@@ -11,7 +11,8 @@
 | 5 | Khung React + Vite + Tailwind để build | `package.json`, `vite.config.ts`, `tsconfig.json`, `index.html`, `src/main.tsx` | `npm run build` thành công |
 | 6 | Bổ sung TypeScript type definitions chuẩn hóa toàn bộ `src/App.tsx`, gỡ bỏ hoàn toàn `// @ts-nocheck` | `src/App.tsx` | `tsc --noEmit` & `npm run build` qua 100% không cảnh báo |
 | 7 | Khắc phục lỗi video stream bị đen/trống khung hình bằng `activeScreenshotImgRef` preloader | `src/App.tsx` | Khung hình đồng bộ qua `Image.onload` trước khi vẽ lên canvas |
-| 8 | Bổ sung công tắc bảo vệ chống chạm nhầm `[Chạm Click: BẬT/TẮT]` và xác nhận 2 lần (2-step confirmation) cho phím nguy hiểm `Ctrl+C` | `src/App.tsx` | Build qua, tránh gián đoạn tiến trình ngoài ý muốn trên mobile |
+| 8 | Bổ sung công tắc bảo vệ chống chạm nhầm `[Click: BẬT/KHÓA]` và xác nhận 2 lần (2-step confirmation) cho phím nguy hiểm `Ctrl+C` | `src/App.tsx` | Build qua, tránh gián đoạn tiến trình ngoài ý muốn trên mobile |
+| 9 | Tích hợp bản cập nhật mới từ mã nguồn gửi kèm: Web Worker Heartbeat chạy ngầm (tự dọn `URL.revokeObjectURL` và tạm ngưng khi `isSending`), Screen Wake Lock (`Màn sáng`), Thanh lệnh nhanh IDE (`Ctrl+I`, `Ctrl+\``, `Ctrl+S`, `Win`), và Bàn di chuột ảo (Virtual Trackpad trái/phải có throttle 90ms chống nghẽn hàng đợi CDP) | `src/App.tsx` | `tsc --noEmit` & `npm run build` thành công |
 | + | Sửa lỗi ký tự thoát bị đôi (do bridge không còn nhúng trong chuỗi) | `server/bridge.cjs` | Bridge chạy đúng |
 | + | Bỏ PIN mặc định `123456` ở giao diện, báo rõ "Sai PIN" | `src/App.tsx` | Build qua |
 

@@ -29,7 +29,16 @@ import {
   Download,
   Video,
   FileText,
-  GitBranch
+  GitBranch,
+  MousePointer,
+  Hand,
+  Save,
+  Play,
+  Sparkles,
+  ExternalLink,
+  Sun,
+  ShieldCheck,
+  AlertCircle
 } from 'lucide-react';
 
 // ============================================================================
@@ -188,6 +197,14 @@ export default function App() {
   const [vibePin, setVibePin] = useState<string>('');
 
   const [inputTargetMode, setInputTargetMode] = useState<'chat' | 'terminal'>('chat');
+  const [controlMode, setControlMode] = useState<'touch' | 'trackpad'>('touch');
+  const [isWakeLocked, setIsWakeLocked] = useState<boolean>(false);
+  const [isBackgroundMode, setIsBackgroundMode] = useState<boolean>(false);
+  const wakeLockRef = useRef<any>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const virtualCursorRef = useRef<{ x: number; y: number }>({ x: 50, y: 50 });
+  const lastTouchRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const lastMoveSentAtRef = useRef<number>(0);
 
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
 
@@ -525,6 +542,87 @@ export default function App() {
     return () => clearInterval(timer);
   }, [autoLiveStream, wsConnected, isSending, refreshAllLiveState]);
 
+  // ==========================================================================
+  // 4. CHẠY NGẦM (BACKGROUND WORKER HEARTBEAT) & CHỐNG NGỦ ĐÔNG (WAKE LOCK)
+  // ==========================================================================
+  useEffect(() => {
+    const workerCode = `
+      let timer = null;
+      self.onmessage = function(e) {
+        if (e.data === 'start') {
+          if (timer) clearInterval(timer);
+          timer = setInterval(() => self.postMessage('ping'), 2500);
+        } else if (e.data === 'stop') {
+          if (timer) clearInterval(timer);
+          timer = null;
+        }
+      };
+    `;
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    const worker = new Worker(blobUrl);
+    workerRef.current = worker;
+
+    worker.onmessage = () => {
+      if (wsConnected && selectedTarget && !isSending) {
+        sendCdpCommand('Runtime.evaluate', { expression: '1+1', returnByValue: true }).catch(() => {});
+      }
+    };
+
+    if (wsConnected && selectedTarget) {
+      worker.postMessage('start');
+    }
+
+    return () => {
+      worker.postMessage('stop');
+      worker.terminate();
+      URL.revokeObjectURL(blobUrl);
+    };
+  }, [wsConnected, selectedTarget, isSending, sendCdpCommand]);
+
+  const requestScreenWakeLock = useCallback(async () => {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        setIsWakeLocked(true);
+        addDevToolsLog('System', 'info', 'Đã bật chế độ giữ sáng màn hình (Screen Wake Lock).');
+        wakeLockRef.current.addEventListener('release', () => {
+          setIsWakeLocked(false);
+        });
+      }
+    } catch {
+      setIsWakeLocked(false);
+    }
+  }, [addDevToolsLog]);
+
+  const releaseScreenWakeLock = useCallback(async () => {
+    try {
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+        setIsWakeLocked(false);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        setIsBackgroundMode(true);
+        addDevToolsLog('System', 'info', 'Ứng dụng chuyển sang chạy ngầm - Web Worker vẫn duy trì kết nối.');
+      } else {
+        setIsBackgroundMode(false);
+        addDevToolsLog('System', 'info', 'Ứng dụng quay lại tiền cảnh - Đồng bộ trạng thái tức thì.');
+        if (wsConnected) {
+          refreshAllLiveState();
+          requestScreenWakeLock();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [wsConnected, refreshAllLiveState, requestScreenWakeLock, addDevToolsLog]);
+
   const attachToTarget = useCallback(
     (target: CdpTarget) => {
       if (!target?.webSocketDebuggerUrl) return;
@@ -536,6 +634,8 @@ export default function App() {
 
       setSelectedTarget(target);
       setWsConnected(true);
+      requestScreenWakeLock();
+      if (workerRef.current) workerRef.current.postMessage('start');
 
       const cleanHost = getCleanHost();
       const wsUrl = target.webSocketDebuggerUrl.replace(
@@ -601,7 +701,7 @@ export default function App() {
         refreshAllLiveState(target);
       }
     },
-    [addDevToolsLog, getCleanHost, isHttps, refreshAllLiveState, sendCdpCommand]
+    [addDevToolsLog, getCleanHost, isHttps, refreshAllLiveState, requestScreenWakeLock, sendCdpCommand]
   );
 
   const scanAndConnect = useCallback(async () => {
@@ -849,6 +949,73 @@ export default function App() {
     }
   };
 
+  // ==========================================================================
+  // BÀN DI CHUỘT ẢO (VIRTUAL TRACKPAD) ĐỘ CHÍNH XÁC CAO
+  // ==========================================================================
+  const handleTrackpadMove = async (e: React.TouchEvent<HTMLDivElement>) => {
+    if (!wsConnected) return;
+    const touch = e.touches[0];
+    if (!touch) return;
+    if (lastTouchRef.current.x === 0 && lastTouchRef.current.y === 0) {
+      lastTouchRef.current = { x: touch.clientX, y: touch.clientY };
+      return;
+    }
+    const dx = (touch.clientX - lastTouchRef.current.x) * 0.45;
+    const dy = (touch.clientY - lastTouchRef.current.y) * 0.45;
+    lastTouchRef.current = { x: touch.clientX, y: touch.clientY };
+
+    const nextX = Math.max(2, Math.min(98, virtualCursorRef.current.x + dx));
+    const nextY = Math.max(2, Math.min(98, virtualCursorRef.current.y + dy));
+    virtualCursorRef.current = { x: nextX, y: nextY };
+
+    const realX = Math.round((nextX / 100) * (remoteViewport.width || 1280));
+    const realY = Math.round((nextY / 100) * (remoteViewport.height || 800));
+
+    setLastClickMarker({
+      percentX: Math.round(nextX),
+      percentY: Math.round(nextY),
+      realX,
+      realY
+    });
+
+    // Chống nghẽn hàng đợi CDP khi kéo ngón tay 60Hz (throttle 90ms)
+    const now = performance.now();
+    if (now - lastMoveSentAtRef.current < 90) return;
+    lastMoveSentAtRef.current = now;
+
+    try {
+      await sendCdpCommand('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: realX,
+        y: realY
+      });
+    } catch {}
+  };
+
+  const handleTrackpadClick = async (button: 'left' | 'right' = 'left') => {
+    if (!wsConnected) return;
+    const realX = Math.round((virtualCursorRef.current.x / 100) * (remoteViewport.width || 1280));
+    const realY = Math.round((virtualCursorRef.current.y / 100) * (remoteViewport.height || 800));
+    try {
+      await sendCdpCommand('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x: realX,
+        y: realY,
+        button,
+        clickCount: 1
+      });
+      await sendCdpCommand('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x: realX,
+        y: realY,
+        button,
+        clickCount: 1
+      });
+      addDevToolsLog('CDP', 'info', `Trackpad Click (${button}) tại (${realX}, ${realY})`);
+      setTimeout(() => refreshAllLiveState(), 400);
+    } catch {}
+  };
+
   const sendRemoteScroll = async (deltaY: number) => {
     if (!wsConnected) return;
     const centerX = Math.round((remoteViewport.width || 1280) / 2);
@@ -875,7 +1042,10 @@ export default function App() {
       Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
       Backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
       'Ctrl+C': { key: 'c', code: 'KeyC', keyCode: 67, modifiers: 2 },
-      'Ctrl+S': { key: 's', code: 'KeyS', keyCode: 83, modifiers: 2 }
+      'Ctrl+S': { key: 's', code: 'KeyS', keyCode: 83, modifiers: 2 },
+      'Ctrl+I': { key: 'i', code: 'KeyI', keyCode: 73, modifiers: 2 },
+      'Ctrl+`': { key: '`', code: 'Backquote', keyCode: 192, modifiers: 2 },
+      Win: { key: 'Meta', code: 'MetaLeft', keyCode: 91, modifiers: 4 }
     };
     const cfg = keyMap[keyLabel];
     if (!cfg) return;
@@ -1104,8 +1274,22 @@ export default function App() {
               >
                 {wsConnected ? `CDP ${realCdpRttMs ? `${realCdpRttMs}ms` : 'Sẵn sàng'}` : 'Chưa kết nối'}
               </span>
+              {isWakeLocked && (
+                <button
+                  type="button"
+                  onClick={releaseScreenWakeLock}
+                  title="Đang giữ sáng màn hình (Chạm để tắt)"
+                  className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-0.5"
+                >
+                  <Sun className="w-2.5 h-2.5" />
+                  <span>Màn sáng</span>
+                </button>
+              )}
             </div>
-            <p className="text-[10px] text-zinc-400 truncate">{statusMessage}</p>
+            <p className="text-[10px] text-zinc-400 truncate">
+              {isBackgroundMode ? '[Chạy ngầm] ' : ''}
+              {statusMessage}
+            </p>
           </div>
         </div>
 
@@ -1290,6 +1474,30 @@ export default function App() {
                 <Terminal className="w-3.5 h-3.5" />
                 <span>Terminal CLI (Claude/Codex)</span>
               </button>
+            </div>
+
+            {/* THANH LỆNH NHANH IDE (QUICK SHORTCUTS) */}
+            <div className="shrink-0 flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              {[
+                { label: 'Ctrl+I (Inline AI)', key: 'Ctrl+I', icon: Sparkles },
+                { label: 'Ctrl+` (Terminal)', key: 'Ctrl+`', icon: Terminal },
+                { label: 'Ctrl+S (Lưu)', key: 'Ctrl+S', icon: Save },
+                { label: 'Win', key: 'Win', icon: ExternalLink }
+              ].map((sc) => {
+                const Icon = sc.icon;
+                return (
+                  <button
+                    key={sc.key}
+                    type="button"
+                    disabled={!wsConnected}
+                    onClick={() => sendRemoteSpecialKey(sc.key)}
+                    className="shrink-0 px-2.5 py-1 rounded-xl bg-[#10141f] border border-zinc-800 hover:border-amber-500/40 text-[11px] text-zinc-200 flex items-center gap-1 active:scale-95 disabled:opacity-40"
+                  >
+                    <Icon className="w-3 h-3 text-amber-400" />
+                    <span>{sc.label}</span>
+                  </button>
+                );
+              })}
             </div>
 
             <div className="shrink-0 bg-[#10141f] border border-zinc-800 rounded-2xl p-2.5 space-y-1.5">
@@ -1731,29 +1939,50 @@ export default function App() {
             )}
 
             <div className="flex-1 min-h-0 bg-[#10141f] border border-zinc-800 rounded-2xl p-2 flex flex-col overflow-hidden">
-              <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1 px-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="flex items-center gap-1">
-                    <MousePointerClick className="w-3.5 h-3.5 text-amber-400" />
-                    Chạm ảnh để Click:
-                  </span>
+              <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1.5 px-1">
+                <div className="flex items-center gap-1 bg-[#080a0f] p-0.5 rounded-lg border border-zinc-800">
                   <button
                     type="button"
-                    onClick={() => setTouchClickEnabled((v) => !v)}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition ${
-                      touchClickEnabled
-                        ? 'bg-rose-600 text-white border-rose-500 animate-pulse'
-                        : 'bg-[#080a0f] border-zinc-700 text-zinc-400 hover:text-white'
+                    onClick={() => setControlMode('touch')}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold flex items-center gap-1 ${
+                      controlMode === 'touch' ? 'bg-rose-600 text-white' : 'text-zinc-400'
                     }`}
                   >
-                    {touchClickEnabled ? 'BẬT (Click thật)' : 'TẮT (Khóa chống chạm)'}
+                    <MousePointerClick className="w-3 h-3" />
+                    <span>Chạm</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setControlMode('trackpad')}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold flex items-center gap-1 ${
+                      controlMode === 'trackpad' ? 'bg-amber-600 text-white' : 'text-zinc-400'
+                    }`}
+                  >
+                    <Hand className="w-3 h-3" />
+                    <span>Trackpad</span>
                   </button>
                 </div>
-                {lastClickMarker && (
-                  <span className="font-mono text-[10px] text-emerald-400">
-                    ({lastClickMarker.realX}, {lastClickMarker.realY})
-                  </span>
-                )}
+
+                <div className="flex items-center gap-1.5">
+                  {controlMode === 'touch' && (
+                    <button
+                      type="button"
+                      onClick={() => setTouchClickEnabled((v) => !v)}
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition ${
+                        touchClickEnabled
+                          ? 'bg-rose-600 text-white border-rose-500 animate-pulse'
+                          : 'bg-[#080a0f] border-zinc-700 text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      {touchClickEnabled ? 'Click: BẬT' : 'Click: KHÓA'}
+                    </button>
+                  )}
+                  {lastClickMarker && (
+                    <span className="font-mono text-[10px] text-emerald-400">
+                      ({lastClickMarker.realX}, {lastClickMarker.realY})
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="flex-1 min-h-0 bg-black rounded-xl border border-zinc-800 flex items-center justify-center overflow-hidden relative">
@@ -1762,8 +1991,8 @@ export default function App() {
                     <img
                       src={`data:image/jpeg;base64,${screenshotBase64}`}
                       alt="VS Code Live Frame"
-                      onClick={handleLiveImageTouchClick}
-                      className="max-w-full max-h-[50dvh] object-contain cursor-crosshair select-none"
+                      onClick={controlMode === 'touch' ? handleLiveImageTouchClick : undefined}
+                      className="max-w-full max-h-[42dvh] object-contain cursor-crosshair select-none"
                     />
                     {lastClickMarker && (
                       <span
@@ -1783,6 +2012,43 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {/* VÙNG BÀN DI CHUỘT ẢO (VIRTUAL TRACKPAD) */}
+              {controlMode === 'trackpad' && (
+                <div className="mt-2 shrink-0 flex flex-col gap-1.5">
+                  <div
+                    onTouchStart={(e) => {
+                      const t = e.touches[0];
+                      if (t) lastTouchRef.current = { x: t.clientX, y: t.clientY };
+                    }}
+                    onTouchMove={handleTrackpadMove}
+                    onTouchEnd={() => {
+                      lastTouchRef.current = { x: 0, y: 0 };
+                    }}
+                    onClick={() => handleTrackpadClick('left')}
+                    className="h-24 w-full rounded-xl bg-[#080a0f] border border-amber-500/40 flex flex-col items-center justify-center text-zinc-400 text-xs select-none touch-none active:bg-amber-500/10"
+                  >
+                    <MousePointer className="w-4 h-4 text-amber-400 mb-1" />
+                    <span>Vuốt tại đây để di chuyển con trỏ chuột (Chạm nhẹ để Click Trái)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleTrackpadClick('left')}
+                      className="py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-white active:scale-95"
+                    >
+                      Chuột Trái (Left Click)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleTrackpadClick('right')}
+                      className="py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-amber-300 active:scale-95"
+                    >
+                      Chuột Phải (Right Click)
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="shrink-0 bg-[#10141f] border border-zinc-800 rounded-2xl p-2 flex items-center gap-1.5 overflow-x-auto">

@@ -4,11 +4,11 @@ from google import genai
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-# The client reads the GEMINI_API_KEY environment variable automatically.
+# The client automatically reads the GEMINI_API_KEY environment variable.
 client = genai.Client()
 
-response = client.models.generate_content(
-    model="gemini-3.1-flash-lite-preview",
-    contents="Xin chào! Hãy giới thiệu ngắn gọn về bạn trong 1 câu.",
+interaction = client.interactions.create(
+    model="gemini-3.5-flash-lite",
+    input="Xin chào! Hãy giới thiệu ngắn gọn về bạn trong 1 câu.",
 )
-print(response.text)
+print(interaction.output_text)

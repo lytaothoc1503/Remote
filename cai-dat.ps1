@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Khoi chay VibeCode Remote: VS Code (CDP 9333) + Host Bridge (9334) + tuy chon Tunnel/LAN.
 
@@ -93,7 +93,12 @@ if (Test-BridgePort) {
     Write-Host '[2/4] Bridge 9334 DANG CHAY. Khong khoi dong them ban thu hai.' -ForegroundColor Yellow
     Write-Host '      Neu quen PIN, hay dung bridge cu (Stop-Process -Name node) roi chay lai script.' -ForegroundColor Yellow
 } else {
-    if (-not $Pin) { $Pin = '{0:D6}' -f (Get-Random -Minimum 0 -Maximum 1000000) }
+    if (-not $Pin) {
+        $weakPins = @('123456', '000000', '111111', '654321', '12345678')
+        do {
+            $Pin = '{0:D6}' -f (Get-Random -Minimum 0 -Maximum 1000000)
+        } while ($weakPins -contains $Pin)
+    }
     $env:VIBE_PIN = $Pin
     $env:VIBE_ROOT = $Root
     $env:VIBE_BIND = $(if ($Lan) { '0.0.0.0' } else { '127.0.0.1' })
@@ -111,8 +116,14 @@ if (Test-BridgePort) {
         }
     }
 
+    if (-not (Test-Path (Join-Path $PSScriptRoot 'dist\index.html'))) {
+        Write-Host '  Chua co dist/, dang build giao dien (npm install + npm run build)...' -ForegroundColor Yellow
+        Push-Location $PSScriptRoot
+        try { npm install; npm run build } finally { Pop-Location }
+    }
+
     Write-Host '[2/4] Khoi dong Host Bridge 9334...' -ForegroundColor Green
-    Start-Process node -ArgumentList $bridgeFile -WindowStyle Hidden | Out-Null
+    Start-Process node -ArgumentList "`"$bridgeFile`"" -WindowStyle Hidden | Out-Null
     $up = $false
     for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Milliseconds 400
@@ -130,7 +141,23 @@ if ($Tunnel) {
             Write-Host '[3/4] cloudflared dang chay, khong khoi dong them.' -ForegroundColor Yellow
         } else {
             Write-Host '[3/4] Khoi dong Cloudflare Quick Tunnel...' -ForegroundColor Green
-            Start-Process cloudflared -ArgumentList 'tunnel', '--url', 'http://127.0.0.1:9334'
+            $tlog = Join-Path $env:TEMP 'vibe-cloudflared.log'
+            Remove-Item $tlog -ErrorAction SilentlyContinue
+            Start-Process cloudflared -ArgumentList 'tunnel', '--url', 'http://127.0.0.1:9334' `
+                -WindowStyle Hidden -RedirectStandardError $tlog | Out-Null
+            $url = $null
+            for ($i = 0; $i -lt 30 -and -not $url; $i++) {
+                Start-Sleep -Milliseconds 500
+                if (Test-Path $tlog) {
+                    $m = Select-String -Path $tlog -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' | Select-Object -First 1
+                    if ($m) { $url = $m.Matches[0].Value }
+                }
+            }
+            if ($url) {
+                Write-Host "  >>> LINK MO GIAO DIEN: $url" -ForegroundColor Cyan
+            } else {
+                Write-Host "  [INFO] Chua doc duoc link, xem: $tlog" -ForegroundColor Yellow
+            }
         }
     } else {
         Write-Host "[3/4] Chua cai cloudflared: winget install Cloudflare.cloudflared" -ForegroundColor Yellow

@@ -62,6 +62,17 @@ export interface HostInfo {
   lanIp: string;
   home: string;
   cdpPort: number;
+  uptimeSec?: number;
+  memoryMb?: number;
+  pooledSockets?: number;
+  cdpStats?: {
+    totalCalls: number;
+    errors: number;
+    lastRttMs: number | null;
+    rttDeltaMs: number;
+    avgRttMs: number;
+    lastActivityAt: number | null;
+  };
 }
 
 export interface CdpTarget {
@@ -193,7 +204,13 @@ const RUN_COMMAND = 'powershell -ExecutionPolicy Bypass -File .\\cai-dat.ps1';
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('connect');
   const [activeAgent, setActiveAgent] = useState<string>('debugger');
-  const [hostAddress, setHostAddress] = useState<string>('127.0.0.1');
+  // Khi giao diện được bridge phục vụ (Tunnel/LAN), mặc định trỏ về chính origin đó.
+  const [hostAddress, setHostAddress] = useState<string>(() => {
+    if (typeof window === 'undefined') return '127.0.0.1';
+    const { protocol, hostname, port, origin } = window.location;
+    if (protocol === 'https:' || port === '9334') return origin;
+    return hostname || '127.0.0.1';
+  });
   const [vibePin, setVibePin] = useState<string>('');
 
   const [inputTargetMode, setInputTargetMode] = useState<'chat' | 'terminal'>('chat');
@@ -253,11 +270,27 @@ export default function App() {
   const [isSending, setIsSending] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string>('');
   const [realCdpRttMs, setRealCdpRttMs] = useState<number | null>(null);
+  const [cdpRttDeltaMs, setCdpRttDeltaMs] = useState<number>(0);
+  const [unchangedSkips, setUnchangedSkips] = useState<number>(0);
+  const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+  const [syncAgeSec, setSyncAgeSec] = useState<number>(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const cmdIdRef = useRef<number>(1);
   const pendingCallbacksRef = useRef<Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timeout: any }>>(new Map());
   const isRefreshingRef = useRef<boolean>(false);
+  const lastDomHashRef = useRef<string>('');
+  const lastScreenHashRef = useRef<string>('');
+  const prevRttRef = useRef<number | null>(null);
+
+  // Theo doi do tuoi du lieu (Time-Ago / Stale detector tham khao cgm-remote-monitor)
+  useEffect(() => {
+    if (!lastSyncAt) return;
+    const t = setInterval(() => {
+      setSyncAgeSec(Math.max(0, Math.floor((Date.now() - lastSyncAt) / 1000)));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [lastSyncAt]);
 
   // Dong bo va load truoc anh chup de dam bao canvas video khong bi trang khung hinh
   useEffect(() => {
@@ -333,11 +366,30 @@ export default function App() {
   }, []);
 
   const sendCdpRaw = useCallback(
-    (method: string, params: Record<string, any> = {}, explicitTarget: CdpTarget | null = null): Promise<any> => {
+    (
+      method: string,
+      params: Record<string, any> = {},
+      explicitTarget: CdpTarget | null = null,
+      prevHash: string = ''
+    ): Promise<any> => {
       return new Promise((resolve, reject) => {
         const ws = wsRef.current;
         const activeTarget = explicitTarget || selectedTarget;
         const startedAt = performance.now();
+
+        const recordRtt = (rtt: number, serverDelta?: number) => {
+          const delta =
+            typeof serverDelta === 'number'
+              ? serverDelta
+              : prevRttRef.current !== null
+              ? rtt - prevRttRef.current
+              : 0;
+          prevRttRef.current = rtt;
+          setRealCdpRttMs(rtt);
+          setCdpRttDeltaMs(delta);
+          setLastSyncAt(Date.now());
+          setSyncAgeSec(0);
+        };
 
         if (ws && ws.readyState === WebSocket.OPEN && !explicitTarget) {
           const id = cmdIdRef.current++;
@@ -349,7 +401,7 @@ export default function App() {
 
           pendingCallbacksRef.current.set(id, {
             resolve: (val: any) => {
-              setRealCdpRttMs(Math.round(performance.now() - startedAt));
+              recordRtt(Math.round(performance.now() - startedAt));
               resolve(val);
             },
             reject,
@@ -368,14 +420,23 @@ export default function App() {
             body: JSON.stringify({
               wsUrl: activeTarget.webSocketDebuggerUrl,
               method,
-              params
+              params,
+              prevHash: prevHash || undefined
             })
           })
             .then((r) => r.json())
             .then((data) => {
               if (!data.ok) throw new Error(data.error || 'CDP Relay Error');
-              setRealCdpRttMs(data.rttMs || Math.round(performance.now() - startedAt));
+              recordRtt(data.rttMs || Math.round(performance.now() - startedAt), data.rttDeltaMs);
               setWsConnected(true);
+              if (data.unchanged) {
+                setUnchangedSkips((n) => n + 1);
+                resolve({ __unchanged: true, hash: data.hash });
+                return;
+              }
+              if (data.hash && data.result && typeof data.result === 'object') {
+                data.result.__hash = data.hash;
+              }
               resolve(data.result);
             })
             .catch((err: any) => {
@@ -394,8 +455,13 @@ export default function App() {
   // Hàng đợi tuần tự: mọi lệnh CDP chạy lần lượt, không xen kẽ (click/gõ phím/làm mới).
   const cdpQueueRef = useRef<Promise<any>>(Promise.resolve());
   const sendCdpCommand = useCallback(
-    (method: string, params: Record<string, any> = {}, explicitTarget: CdpTarget | null = null): Promise<any> => {
-      const run = () => sendCdpRaw(method, params, explicitTarget);
+    (
+      method: string,
+      params: Record<string, any> = {},
+      explicitTarget: CdpTarget | null = null,
+      prevHash: string = ''
+    ): Promise<any> => {
+      const run = () => sendCdpRaw(method, params, explicitTarget, prevHash);
       const p = cdpQueueRef.current.then(run, run);
       cdpQueueRef.current = p.catch(() => {});
       return p;
@@ -485,10 +551,19 @@ export default function App() {
         const res: any = await sendCdpCommand(
           'Runtime.evaluate',
           { expression: domExtractorScript, returnByValue: true },
-          targetToUse
+          targetToUse,
+          lastDomHashRef.current
         );
+        if (res?.__unchanged) return;
+        if (res?.__hash) lastDomHashRef.current = res.__hash;
         const val = res?.result?.value;
         if (val) {
+          const domSig = `${val.w}x${val.h}|${(val.messages || []).length}|${(val.buttons || []).length}|${val.terminalContent || ''}`;
+          if (!res?.__hash && domSig === lastDomHashRef.current) {
+            setUnchangedSkips((n) => n + 1);
+            return;
+          }
+          if (!res?.__hash) lastDomHashRef.current = domSig;
           setRemoteViewport({ width: val.w || 1280, height: val.h || 800 });
           setLiveDomMessages(val.messages || []);
           setLiveDomButtons(val.buttons || []);
@@ -510,9 +585,20 @@ export default function App() {
         const res: any = await sendCdpCommand(
           'Page.captureScreenshot',
           { format: 'jpeg', quality: 65 },
-          targetToUse
+          targetToUse,
+          lastScreenHashRef.current
         );
-        if (res?.data) setScreenshotBase64(res.data);
+        if (res?.__unchanged) return;
+        if (res?.__hash) lastScreenHashRef.current = res.__hash;
+        if (res?.data) {
+          setScreenshotBase64((prev) => {
+            if (prev === res.data) {
+              setUnchangedSkips((n) => n + 1);
+              return prev;
+            }
+            return res.data;
+          });
+        }
       } catch {}
     },
     [sendCdpCommand, selectedTarget]
@@ -1268,11 +1354,15 @@ export default function App() {
               <span
                 className={`shrink-0 text-[10px] px-2 py-0.5 rounded-full font-semibold border ${
                   wsConnected
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    ? syncAgeSec > 15
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                 }`}
               >
-                {wsConnected ? `CDP ${realCdpRttMs ? `${realCdpRttMs}ms` : 'Sẵn sàng'}` : 'Chưa kết nối'}
+                {wsConnected
+                  ? `CDP ${realCdpRttMs ? `${realCdpRttMs}ms (${cdpRttDeltaMs >= 0 ? `+${cdpRttDeltaMs}` : cdpRttDeltaMs})` : 'Sẵn sàng'}${syncAgeSec > 5 ? ` · ${syncAgeSec}s` : ''}`
+                  : 'Chưa kết nối'}
               </span>
               {isWakeLocked && (
                 <button
@@ -1400,6 +1490,27 @@ export default function App() {
                 <RefreshCw className={`w-3.5 h-3.5 ${bridgeStatus === 'scanning' ? 'animate-spin' : ''}`} />
                 Quét & Kết Nối Tức Thì
               </button>
+
+              {hostInfo && (
+                <div className="pt-1 grid grid-cols-4 gap-1.5 text-[10px] font-mono text-zinc-400">
+                  <div className="bg-[#080a0f] border border-zinc-800 rounded-lg px-2 py-1 text-center">
+                    <div className="text-zinc-500">RAM</div>
+                    <div className="text-emerald-300 font-bold">{hostInfo.memoryMb ?? '--'}MB</div>
+                  </div>
+                  <div className="bg-[#080a0f] border border-zinc-800 rounded-lg px-2 py-1 text-center">
+                    <div className="text-zinc-500">WS Pool</div>
+                    <div className="text-cyan-300 font-bold">{hostInfo.pooledSockets ?? 0}</div>
+                  </div>
+                  <div className="bg-[#080a0f] border border-zinc-800 rounded-lg px-2 py-1 text-center">
+                    <div className="text-zinc-500">Avg RTT</div>
+                    <div className="text-amber-300 font-bold">{hostInfo.cdpStats?.avgRttMs ?? realCdpRttMs ?? '--'}ms</div>
+                  </div>
+                  <div className="bg-[#080a0f] border border-zinc-800 rounded-lg px-2 py-1 text-center">
+                    <div className="text-zinc-500">Delta Skip</div>
+                    <div className="text-rose-300 font-bold">{unchangedSkips}</div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="bg-[#10141f] border border-zinc-800 rounded-2xl p-3 space-y-2">

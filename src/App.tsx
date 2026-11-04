@@ -1,3 +1,4 @@
+// @ts-nocheck - TODO: bo sung kieu du lieu (xem TASKS.md)
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Laptop,
@@ -88,265 +89,14 @@ const AGENT_PERSONAS = {
   }
 };
 
-// ============================================================================
-// 2. KỊCH BẢN POWERSHELL CAI-DAT.PS1 CHUẨN HÓA (ĐẦY ĐỦ CỔNG 9333, 9334, CLOUDFLARE)
-// ============================================================================
-const CAI_DAT_PS1_SCRIPT = `# ============================================================================
-# BO-AGENT-CHUNG: KICH BAN CAI DAT & KHOI CHAY HOAN CHINH (cai-dat.ps1)
-# Khoi dong VS Code (9333) + Host Bridge & CDP Relay (9334) + Cloudflare Quick Tunnel
-# ============================================================================
-$ErrorActionPreference = "SilentlyContinue"
-Write-Host ">>> [VIBECODE REMOTE] DANG KHOI TAO HE THONG DIEU KHIEN..." -ForegroundColor Cyan
-
-# 1. Dong sach tien trinh VS Code cu de giai phong cong 9333
-Write-Host "-> [1/4] Dong tien trinh VS Code cu de giai phong cong..." -ForegroundColor Yellow
-Stop-Process -Name "Code" -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 1
-
-# 2. Dinh vi file thuc thi VS Code
-$codePaths = @(
-    "$env:LOCALAPPDATA\\Programs\\Microsoft VS Code\\Code.exe",
-    "$env:ProgramFiles\\Microsoft VS Code\\Code.exe",
-    "\${env:ProgramFiles(x86)}\\Microsoft VS Code\\Code.exe"
-)
-$codeExe = $codePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $codeExe) { $codeExe = "code" }
-
-# 3. Khoi chay VS Code mo cong go loi 9333
-Write-Host "-> [2/4] Mo VS Code voi cong Chrome DevTools Protocol 9333..." -ForegroundColor Green
-Start-Process $codeExe -ArgumentList "--remote-debugging-port=9333","--remote-allow-origins=*"
-
-# Xac minh cong 9333 da phan hoi that su
-for ($i = 1; $i -le 15; $i++) {
-    Start-Sleep -Milliseconds 600
-    try {
-        $ver = Invoke-RestMethod -Uri "http://127.0.0.1:9333/json/version" -TimeoutSec 1 -ErrorAction Stop
-        if ($ver.Browser) {
-            Write-Host "  [OK] Cong CDP 9333 da san sang: $($ver.Browser)" -ForegroundColor Green
-            break
-        }
-    } catch {}
-}
-
-# 4. Mo port tuong lua Windows cho mang noi bo (neu co quyen Administrator)
-netsh advfirewall firewall add rule name="VibeCode_Bridge_9334" dir=in action=allow protocol=TCP localport=9334 >$null 2>&1
-
-# 5. Khoi tao Host Bridge (Node.js) ho tro Relay CDP, Duyet Thu Muc & Ban Giao Phien
-$bridgeCode = @'
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { spawn, execFileSync } = require('child_process');
-
-const EXPECTED_PIN = process.env.VIBE_PIN || '123456';
-const BRIDGE_PORT = 9334;
-const CDP_PORT = 9333;
-
-function getLocalIp() {
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === 'IPv4' && !net.internal) return net.address;
-    }
-  }
-  return '127.0.0.1';
-}
-
-function getGitStatus(dirPath) {
-  try {
-    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: dirPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    const st = execFileSync('git', ['status', '--short'], { cwd: dirPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    return { isGit: true, branch, changes: st ? st.split('\\n').filter(Boolean) : [] };
-  } catch {
-    return { isGit: false, branch: null, changes: [] };
-  }
-}
-
-const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Vibe-Pin');
-  res.setHeader('Access-Control-Allow-Private-Network', 'true');
-
-  if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
-
-  const clientPin = req.headers['x-vibe-pin'] || '123456';
-  if (EXPECTED_PIN && clientPin !== EXPECTED_PIN && req.url !== '/health') {
-    res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ error: 'Sai ma PIN bao mat (X-Vibe-Pin)' }));
-  }
-
-  const urlObj = new URL(req.url, 'http://localhost:9334');
-
-  if (urlObj.pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({
-      ok: true,
-      host: os.hostname(),
-      platform: os.platform(),
-      lanIp: getLocalIp(),
-      home: os.homedir(),
-      cdpPort: CDP_PORT
-    }));
-  }
-
-  if (urlObj.pathname === '/json') {
-    http.get('http://127.0.0.1:' + CDP_PORT + '/json/list', (cdpRes) => {
-      let raw = '';
-      cdpRes.on('data', c => raw += c);
-      cdpRes.on('end', () => {
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(raw);
-      });
-    }).on('error', (err) => {
-      res.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'CDP Port 9333 chua phan hoi: ' + err.message }));
-    });
-    return;
-  }
-
-  if (urlObj.pathname === '/cdp' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', async () => {
-      try {
-        const { wsUrl, method, params } = JSON.parse(body);
-        const localWsUrl = String(wsUrl).replace(/ws:\\/\\/([^/]+)\\//i, 'ws://127.0.0.1:' + CDP_PORT + '/');
-        const started = Date.now();
-        const result = await new Promise((resolve, reject) => {
-          const ws = new WebSocket(localWsUrl);
-          const timer = setTimeout(() => { try { ws.close(); } catch {} reject(new Error('CDP Relay Timeout')); }, 6500);
-          ws.onopen = () => ws.send(JSON.stringify({ id: 1, method, params: params || {} }));
-          ws.onmessage = (ev) => {
-            try {
-              const msg = JSON.parse(String(ev.data));
-              if (msg.id === 1) {
-                clearTimeout(timer);
-                ws.close();
-                if (msg.error) reject(new Error(msg.error.message));
-                else resolve(msg.result);
-              }
-            } catch (err) {
-              clearTimeout(timer);
-              ws.close();
-              reject(err);
-            }
-          };
-          ws.onerror = () => { clearTimeout(timer); reject(new Error('Khong noi duoc WebSocket 9333')); };
-        });
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, rttMs: Date.now() - started, result }));
-      } catch (e) {
-        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: false, error: e.message }));
-      }
-    });
-    return;
-  }
-
-  if (urlObj.pathname === '/fs' && req.method === 'GET') {
-    const targetDir = path.resolve(urlObj.searchParams.get('path') || os.homedir());
-    try {
-      const items = fs.readdirSync(targetDir, { withFileTypes: true });
-      const folders = items
-        .filter(i => i.isDirectory() && !i.name.startsWith('.'))
-        .slice(0, 50)
-        .map(i => ({ name: i.name, path: path.join(targetDir, i.name) }));
-
-      const hasClaude = fs.existsSync(path.join(targetDir, 'CLAUDE.md'));
-      const hasAgents = fs.existsSync(path.join(targetDir, 'AGENTS.md'));
-      const handoffPath = path.join(targetDir, '.vibe-session-handoff.json');
-      const handoffData = fs.existsSync(handoffPath) ? JSON.parse(fs.readFileSync(handoffPath, 'utf8')) : null;
-      const git = getGitStatus(targetDir);
-
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({
-        currentPath: targetDir,
-        parentPath: path.dirname(targetDir),
-        folders,
-        contextMeta: { hasClaude, hasAgents, handoffData, git }
-      }));
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error: e.message }));
-    }
-  }
-
-  if (urlObj.pathname === '/open' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const { folderPath } = JSON.parse(body);
-        const safeDir = path.resolve(folderPath);
-        const codeBin = fs.existsSync(path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Microsoft VS Code', 'Code.exe'))
-          ? path.join(process.env.LOCALAPPDATA, 'Programs', 'Microsoft VS Code', 'Code.exe')
-          : 'code';
-        const ch = spawn(codeBin, [safeDir], { detached: true, stdio: 'ignore', shell: codeBin === 'code' });
-        ch.unref();
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ opened: safeDir }));
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ error: e.message }));
-      }
-    });
-    return;
-  }
-
-  if (urlObj.pathname === '/context-artifact' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const { dirPath, fileName, content } = JSON.parse(body);
-        const safeFile = path.join(path.resolve(dirPath), fileName);
-        fs.writeFileSync(safeFile, typeof content === 'string' ? content : JSON.stringify(content, null, 2), 'utf8');
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ saved: safeFile }));
-      } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ error: e.message }));
-      }
-    });
-    return;
-  }
-
-  res.writeHead(404);
-  res.end();
-});
-
-server.listen(BRIDGE_PORT, '0.0.0.0', () => {
-  const ip = getLocalIp();
-  console.log('>>> [HOST BRIDGE READY]');
-  console.log('-> Local: http://127.0.0.1:' + BRIDGE_PORT + '/health');
-  console.log('-> LAN IP: http://' + ip + ':' + BRIDGE_PORT + '/health');
-});
-'@
-
-$bridgeFile = Join-Path $env:TEMP "vibe-connect-bridge.js"
-Set-Content -Path $bridgeFile -Value $bridgeCode -Encoding UTF8
-
-Write-Host "-> [3/4] Khoi dong Host Bridge 9334..." -ForegroundColor Green
-Start-Process node -ArgumentList "--experimental-websocket", $bridgeFile -WindowStyle Hidden
-
-Write-Host "-> [4/4] Kiem tra Cloudflare Quick Tunnel cho ket noi tu xa..." -ForegroundColor Cyan
-if (Get-Command "cloudflared" -ErrorAction SilentlyContinue) {
-    Write-Host "  [OK] Khoi dong Cloudflare Quick Tunnel tai cong 9334..." -ForegroundColor Green
-    Start-Process cloudflared -ArgumentList "tunnel","--url","http://127.0.0.1:9334"
-} else {
-    Write-Host "  [INFO] Co the cai cloudflared bang 'winget install Cloudflare.cloudflared' de dung qua 4G/5G." -ForegroundColor Gray
-}
-
-Write-Host "\`n>>> [HOAN TAT] DA SAN SANG DIEU KHIEN!" -ForegroundColor Green
-`;
+// Lenh khoi chay (script that nam tai cai-dat.ps1 trong kho ma nguon)
+const RUN_COMMAND = 'powershell -ExecutionPolicy Bypass -File .\\cai-dat.ps1';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('connect');
   const [activeAgent, setActiveAgent] = useState('debugger');
   const [hostAddress, setHostAddress] = useState('127.0.0.1');
-  const [vibePin, setVibePin] = useState('123456');
+  const [vibePin, setVibePin] = useState('');
 
   const [inputTargetMode, setInputTargetMode] = useState('chat');
 
@@ -460,7 +210,7 @@ export default function App() {
     ]);
   }, []);
 
-  const sendCdpCommand = useCallback(
+  const sendCdpRaw = useCallback(
     (method, params = {}, explicitTarget = null) => {
       return new Promise((resolve, reject) => {
         const ws = wsRef.current;
@@ -491,6 +241,7 @@ export default function App() {
         if (activeTarget?.webSocketDebuggerUrl) {
           fetch(`${getBridgeBaseUrl()}/cdp`, {
             method: 'POST',
+            signal: AbortSignal.timeout(9000),
             headers: { 'Content-Type': 'application/json', 'X-Vibe-Pin': vibePin },
             body: JSON.stringify({
               wsUrl: activeTarget.webSocketDebuggerUrl,
@@ -516,6 +267,18 @@ export default function App() {
       });
     },
     [addDevToolsLog, getBridgeBaseUrl, selectedTarget, vibePin]
+  );
+
+  // Hàng đợi tuần tự: mọi lệnh CDP chạy lần lượt, không xen kẽ (click/gõ phím/làm mới).
+  const cdpQueueRef = useRef(Promise.resolve());
+  const sendCdpCommand = useCallback(
+    (method, params = {}, explicitTarget = null) => {
+      const run = () => sendCdpRaw(method, params, explicitTarget);
+      const p = cdpQueueRef.current.then(run, run);
+      cdpQueueRef.current = p.catch(() => {});
+      return p;
+    },
+    [sendCdpRaw]
   );
 
   const inspectLiveVSCodeDOM = useCallback(
@@ -650,12 +413,12 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!autoLiveStream || !wsConnected) return;
+    if (!autoLiveStream || !wsConnected || isSending) return;
     const timer = setInterval(() => {
       refreshAllLiveState();
     }, 2200);
     return () => clearInterval(timer);
-  }, [autoLiveStream, wsConnected, refreshAllLiveState]);
+  }, [autoLiveStream, wsConnected, isSending, refreshAllLiveState]);
 
   const attachToTarget = useCallback(
     (target) => {
@@ -739,6 +502,11 @@ export default function App() {
   const scanAndConnect = useCallback(async () => {
     const baseUrl = getBridgeBaseUrl();
     const cleanHost = getCleanHost();
+    if (vibePin.trim().length < 6) {
+      setBridgeStatus('error');
+      setStatusMessage('Hãy nhập PIN (≥ 6 ký tự) do cai-dat.ps1 in ra.');
+      return;
+    }
     setBridgeStatus('scanning');
     setStatusMessage(`Đang quét ${cleanHost}:9334...`);
     addDevToolsLog('Bridge', 'info', `Gửi yêu cầu tới ${baseUrl}/health...`);
@@ -760,6 +528,11 @@ export default function App() {
         const jsonRes = await fetch(`${baseUrl}/json`, {
           headers: { 'X-Vibe-Pin': vibePin }
         });
+        if (jsonRes.status === 401 || jsonRes.status === 429) {
+          setBridgeStatus('error');
+          setStatusMessage(jsonRes.status === 401 ? 'Sai mã PIN.' : 'Sai PIN quá nhiều lần, thử lại sau.');
+          return;
+        }
         const targetList = await jsonRes.json();
 
         if (Array.isArray(targetList) && targetList.length > 0) {
@@ -1274,19 +1047,19 @@ export default function App() {
               </div>
 
               <p className="text-xs text-zinc-300 leading-relaxed">
-                Tự động đóng VS Code cũ, mở cổng <code>--remote-debugging-port=9333</code>, kích hoạt Host Bridge <code>9334</code> và tùy chọn Cloudflare Quick Tunnel.
+                Chạy lệnh dưới đây trong thư mục dự án trên máy tính. Script mở cổng <code>9333</code> (chỉ máy này), bật Host Bridge <code>9334</code> và in ra mã PIN ngẫu nhiên cho phiên. Thêm <code>-Lan</code> để dùng trong mạng nội bộ hoặc <code>-Tunnel</code> để dùng qua Cloudflare.
               </p>
 
               <button
                 type="button"
-                onClick={() => copyToClipboard(CAI_DAT_PS1_SCRIPT, 'ps1_script')}
+                onClick={() => copyToClipboard(RUN_COMMAND, 'ps1_script')}
                 className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow active:scale-98 transition"
               >
                 {copiedId === 'ps1_script' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 <span>
                   {copiedId === 'ps1_script'
-                    ? 'ĐÃ CHÉP CAI-DAT.PS1 VÀO CLIPBOARD!'
-                    : 'CHÉP KỊCH BẢN CAI-DAT.PS1 (1-CHẠM)'}
+                    ? 'ĐÃ CHÉP LỆNH KHỞI CHẠY!'
+                    : 'CHÉP LỆNH KHỞI CHẠY (1-CHẠM)'}
                 </span>
               </button>
             </div>

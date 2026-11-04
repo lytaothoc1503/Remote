@@ -1,4 +1,3 @@
-// @ts-nocheck - TODO: bo sung kieu du lieu (xem TASKS.md)
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Laptop,
@@ -34,9 +33,99 @@ import {
 } from 'lucide-react';
 
 // ============================================================================
-// 1. ĐỊNH NGHĨA BỘ TÁC NHÂN (bo-agent-chung-main)
+// 1. ĐỊNH NGHĨA BỘ TÁC NHÂN (bo-agent-chung-main) VÀ KIỂU DỮ LIỆU CHUẨN
 // ============================================================================
-const AGENT_PERSONAS = {
+export interface AgentPersona {
+  id: string;
+  name: string;
+  badge: string;
+  color: string;
+  border: string;
+  bg: string;
+  text: string;
+  description: string;
+}
+
+export interface HostInfo {
+  ok: boolean;
+  host: string;
+  platform: string;
+  lanIp: string;
+  home: string;
+  cdpPort: number;
+}
+
+export interface CdpTarget {
+  id: string;
+  title?: string;
+  type: string;
+  url?: string;
+  webSocketDebuggerUrl?: string;
+}
+
+export interface ClickMarker {
+  percentX: number;
+  percentY: number;
+  realX: number;
+  realY: number;
+}
+
+export interface DomMessage {
+  role: 'user' | 'agent';
+  text: string;
+}
+
+export interface DomButton {
+  label: string;
+  isPriority: boolean;
+  x: number;
+  y: number;
+}
+
+export interface CodeChange {
+  title: string;
+  content: string;
+}
+
+export interface FsFolder {
+  name: string;
+  path: string;
+}
+
+export interface FsContextMeta {
+  hasClaude: boolean;
+  hasAgents: boolean;
+  handoffData: any;
+  git: {
+    isGit: boolean;
+    branch: string | null;
+    changes: string[];
+  } | null;
+}
+
+export interface DevToolsLog {
+  id: number;
+  timestamp: string;
+  source: string;
+  level: 'info' | 'warn' | 'error';
+  message: string;
+  details?: any;
+}
+
+export interface DebuggerDiagnosis {
+  status: 'healthy' | 'issue_found';
+  title: string;
+  rootCause: string;
+  remediation: string[];
+}
+
+export interface PipelineStep {
+  step: number;
+  label: string;
+  active: boolean;
+}
+
+const AGENT_PERSONAS: Record<string, AgentPersona> = {
   debugger: {
     id: 'debugger',
     name: 'Debugger Agent (Chromium DevTools)',
@@ -93,62 +182,78 @@ const AGENT_PERSONAS = {
 const RUN_COMMAND = 'powershell -ExecutionPolicy Bypass -File .\\cai-dat.ps1';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('connect');
-  const [activeAgent, setActiveAgent] = useState('debugger');
-  const [hostAddress, setHostAddress] = useState('127.0.0.1');
-  const [vibePin, setVibePin] = useState('');
+  const [activeTab, setActiveTab] = useState<string>('connect');
+  const [activeAgent, setActiveAgent] = useState<string>('debugger');
+  const [hostAddress, setHostAddress] = useState<string>('127.0.0.1');
+  const [vibePin, setVibePin] = useState<string>('');
 
-  const [inputTargetMode, setInputTargetMode] = useState('chat');
+  const [inputTargetMode, setInputTargetMode] = useState<'chat' | 'terminal'>('chat');
 
   const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
 
-  const [bridgeStatus, setBridgeStatus] = useState('disconnected');
-  const [statusMessage, setStatusMessage] = useState(
+  const [bridgeStatus, setBridgeStatus] = useState<'disconnected' | 'scanning' | 'connected' | 'error'>('disconnected');
+  const [statusMessage, setStatusMessage] = useState<string>(
     isHttps
       ? 'Đang mở trên HTTPS: Hãy nhập IP LAN hoặc bật Cloudflare Tunnel rồi bấm Quét lại'
       : 'Sẵn sàng kết nối bộ tác nhân Chromium DevTools'
   );
-  const [hostInfo, setHostInfo] = useState(null);
+  const [hostInfo, setHostInfo] = useState<HostInfo | null>(null);
 
-  const [targets, setTargets] = useState([]);
-  const [selectedTarget, setSelectedTarget] = useState(null);
-  const [wsConnected, setWsConnected] = useState(false);
+  const [targets, setTargets] = useState<CdpTarget[]>([]);
+  const [selectedTarget, setSelectedTarget] = useState<CdpTarget | null>(null);
+  const [wsConnected, setWsConnected] = useState<boolean>(false);
 
-  const [screenshotBase64, setScreenshotBase64] = useState(null);
-  const [remoteViewport, setRemoteViewport] = useState({ width: 1280, height: 800 });
-  const [lastClickMarker, setLastClickMarker] = useState(null);
-  const [autoLiveStream, setAutoLiveStream] = useState(false);
+  const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
+  const [remoteViewport, setRemoteViewport] = useState<{ width: number; height: number }>({ width: 1280, height: 800 });
+  const [lastClickMarker, setLastClickMarker] = useState<ClickMarker | null>(null);
+  const [autoLiveStream, setAutoLiveStream] = useState<boolean>(false);
+  const [touchClickEnabled, setTouchClickEnabled] = useState<boolean>(false);
+  const [confirmCtrlC, setConfirmCtrlC] = useState<boolean>(false);
 
-  const [liveDomMessages, setLiveDomMessages] = useState([]);
-  const [liveDomButtons, setLiveDomButtons] = useState([]);
-  const [liveCodeChanges, setLiveCodeChanges] = useState([]);
-  const [liveTerminalText, setLiveTerminalText] = useState('');
-  const [pipelineStep, setPipelineStep] = useState({ step: 0, label: 'Sẵn sàng nhận lệnh', active: false });
+  const [liveDomMessages, setLiveDomMessages] = useState<DomMessage[]>([]);
+  const [liveDomButtons, setLiveDomButtons] = useState<DomButton[]>([]);
+  const [liveCodeChanges, setLiveCodeChanges] = useState<CodeChange[]>([]);
+  const [liveTerminalText, setLiveTerminalText] = useState<string>('');
+  const [pipelineStep, setPipelineStep] = useState<PipelineStep>({ step: 0, label: 'Sẵn sàng nhận lệnh', active: false });
 
-  const [currentFsPath, setCurrentFsPath] = useState('');
-  const [fsFolders, setFsFolders] = useState([]);
-  const [fsContextMeta, setFsContextMeta] = useState(null);
-  const [contextHandoffNotes, setContextHandoffNotes] = useState('');
+  const [currentFsPath, setCurrentFsPath] = useState<string>('');
+  const [fsFolders, setFsFolders] = useState<FsFolder[]>([]);
+  const [fsContextMeta, setFsContextMeta] = useState<FsContextMeta | null>(null);
+  const [contextHandoffNotes, setContextHandoffNotes] = useState<string>('');
 
-  const [isRecordingVideo, setIsRecordingVideo] = useState(false);
-  const [recordedVideoUrl, setRecordedVideoUrl] = useState(null);
-  const mediaRecorderRef = useRef(null);
-  const recordedChunksRef = useRef([]);
+  const [isRecordingVideo, setIsRecordingVideo] = useState<boolean>(false);
+  const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const activeScreenshotImgRef = useRef<HTMLImageElement | null>(null);
 
-  const [devToolsLogs, setDevToolsLogs] = useState([]);
-  const [devToolsFilter, setDevToolsFilter] = useState('all');
-  const [debuggerDiagnosis, setDebuggerDiagnosis] = useState(null);
-  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [devToolsLogs, setDevToolsLogs] = useState<DevToolsLog[]>([]);
+  const [devToolsFilter, setDevToolsFilter] = useState<'all' | 'error' | 'warn' | 'cdp'>('all');
+  const [debuggerDiagnosis, setDebuggerDiagnosis] = useState<DebuggerDiagnosis | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState<boolean>(false);
 
-  const [promptInput, setPromptInput] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [copiedId, setCopiedId] = useState('');
-  const [realCdpRttMs, setRealCdpRttMs] = useState(null);
+  const [promptInput, setPromptInput] = useState<string>('');
+  const [isSending, setIsSending] = useState<boolean>(false);
+  const [copiedId, setCopiedId] = useState<string>('');
+  const [realCdpRttMs, setRealCdpRttMs] = useState<number | null>(null);
 
-  const wsRef = useRef(null);
-  const cmdIdRef = useRef(1);
-  const pendingCallbacksRef = useRef(new Map());
-  const isRefreshingRef = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const cmdIdRef = useRef<number>(1);
+  const pendingCallbacksRef = useRef<Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timeout: any }>>(new Map());
+  const isRefreshingRef = useRef<boolean>(false);
+
+  // Dong bo va load truoc anh chup de dam bao canvas video khong bi trang khung hinh
+  useEffect(() => {
+    if (!screenshotBase64) {
+      activeScreenshotImgRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      activeScreenshotImgRef.current = img;
+    };
+    img.src = `data:image/jpeg;base64,${screenshotBase64}`;
+  }, [screenshotBase64]);
 
   // ==========================================================================
   // 3. CÁC HÀM XỬ LÝ ĐỊA CHỈ & SAO CHÉP
@@ -174,7 +279,7 @@ export default function App() {
     return `http://${clean}:9334`;
   }, [hostAddress, getCleanHost]);
 
-  const copyToClipboard = useCallback(async (text, id) => {
+  const copyToClipboard = useCallback(async (text: string, id: string) => {
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(text);
@@ -191,7 +296,7 @@ export default function App() {
     } catch {}
   }, []);
 
-  const addDevToolsLog = useCallback((source, level, message, details = null) => {
+  const addDevToolsLog = useCallback((source: string, level: 'info' | 'warn' | 'error', message: string, details: any = null) => {
     const timestamp = new Date().toLocaleTimeString('vi-VN', {
       hour: '2-digit',
       minute: '2-digit',
@@ -211,7 +316,7 @@ export default function App() {
   }, []);
 
   const sendCdpRaw = useCallback(
-    (method, params = {}, explicitTarget = null) => {
+    (method: string, params: Record<string, any> = {}, explicitTarget: CdpTarget | null = null): Promise<any> => {
       return new Promise((resolve, reject) => {
         const ws = wsRef.current;
         const activeTarget = explicitTarget || selectedTarget;
@@ -226,7 +331,7 @@ export default function App() {
           }, 6000);
 
           pendingCallbacksRef.current.set(id, {
-            resolve: (val) => {
+            resolve: (val: any) => {
               setRealCdpRttMs(Math.round(performance.now() - startedAt));
               resolve(val);
             },
@@ -256,8 +361,8 @@ export default function App() {
               setWsConnected(true);
               resolve(data.result);
             })
-            .catch((err) => {
-              addDevToolsLog('CDP', 'error', `Lỗi Relay ${method}: ${err.message}`);
+            .catch((err: any) => {
+              addDevToolsLog('CDP', 'error', `Lỗi Relay ${method}: ${err?.message || err}`);
               reject(err);
             });
           return;
@@ -270,9 +375,9 @@ export default function App() {
   );
 
   // Hàng đợi tuần tự: mọi lệnh CDP chạy lần lượt, không xen kẽ (click/gõ phím/làm mới).
-  const cdpQueueRef = useRef(Promise.resolve());
+  const cdpQueueRef = useRef<Promise<any>>(Promise.resolve());
   const sendCdpCommand = useCallback(
-    (method, params = {}, explicitTarget = null) => {
+    (method: string, params: Record<string, any> = {}, explicitTarget: CdpTarget | null = null): Promise<any> => {
       const run = () => sendCdpRaw(method, params, explicitTarget);
       const p = cdpQueueRef.current.then(run, run);
       cdpQueueRef.current = p.catch(() => {});
@@ -282,7 +387,7 @@ export default function App() {
   );
 
   const inspectLiveVSCodeDOM = useCallback(
-    async (explicitTarget = null) => {
+    async (explicitTarget: CdpTarget | null = null) => {
       const targetToUse = explicitTarget || selectedTarget;
       if (!targetToUse) return;
 
@@ -360,7 +465,7 @@ export default function App() {
       })()`;
 
       try {
-        const res = await sendCdpCommand(
+        const res: any = await sendCdpCommand(
           'Runtime.evaluate',
           { expression: domExtractorScript, returnByValue: true },
           targetToUse
@@ -373,19 +478,19 @@ export default function App() {
           setLiveCodeChanges(val.codeBlocks || []);
           if (val.terminalContent) setLiveTerminalText(val.terminalContent);
         }
-      } catch (err) {
-        addDevToolsLog('Runtime', 'error', `Không thể trích xuất DOM: ${err.message}`);
+      } catch (err: any) {
+        addDevToolsLog('Runtime', 'error', `Không thể trích xuất DOM: ${err?.message || err}`);
       }
     },
     [sendCdpCommand, selectedTarget, addDevToolsLog]
   );
 
   const captureLiveScreenshot = useCallback(
-    async (explicitTarget = null) => {
+    async (explicitTarget: CdpTarget | null = null) => {
       const targetToUse = explicitTarget || selectedTarget;
       if (!targetToUse) return;
       try {
-        const res = await sendCdpCommand(
+        const res: any = await sendCdpCommand(
           'Page.captureScreenshot',
           { format: 'jpeg', quality: 65 },
           targetToUse
@@ -397,7 +502,7 @@ export default function App() {
   );
 
   const refreshAllLiveState = useCallback(
-    async (explicitTarget = null) => {
+    async (explicitTarget: CdpTarget | null = null) => {
       if (isRefreshingRef.current) return;
       isRefreshingRef.current = true;
       try {
@@ -421,7 +526,7 @@ export default function App() {
   }, [autoLiveStream, wsConnected, isSending, refreshAllLiveState]);
 
   const attachToTarget = useCallback(
-    (target) => {
+    (target: CdpTarget) => {
       if (!target?.webSocketDebuggerUrl) return;
       if (wsRef.current) {
         try {
@@ -466,7 +571,7 @@ export default function App() {
           try {
             const msg = JSON.parse(event.data);
             if (msg.id && pendingCallbacksRef.current.has(msg.id)) {
-              const { resolve, reject, timeout } = pendingCallbacksRef.current.get(msg.id);
+              const { resolve, reject, timeout } = pendingCallbacksRef.current.get(msg.id)!;
               clearTimeout(timeout);
               pendingCallbacksRef.current.delete(msg.id);
               if (msg.error) reject(new Error(msg.error.message || 'CDP Error'));
@@ -480,7 +585,7 @@ export default function App() {
             }
             if (msg.method === 'Console.messageAdded') {
               const entry = msg.params?.message;
-              const lvl = entry?.level === 'error' ? 'error' : entry?.level === 'warning' ? 'warn' : 'info';
+              const lvl: 'error' | 'warn' | 'info' = entry?.level === 'error' ? 'error' : entry?.level === 'warning' ? 'warn' : 'info';
               addDevToolsLog('Console', lvl, `[${entry?.source}] ${entry?.text}`);
             }
           } catch {}
@@ -522,7 +627,7 @@ export default function App() {
       clearTimeout(timer);
 
       if (healthRes.ok) {
-        const health = await healthRes.json();
+        const health: HostInfo = await healthRes.json();
         setHostInfo(health);
 
         const jsonRes = await fetch(`${baseUrl}/json`, {
@@ -533,7 +638,7 @@ export default function App() {
           setStatusMessage(jsonRes.status === 401 ? 'Sai mã PIN.' : 'Sai PIN quá nhiều lần, thử lại sau.');
           return;
         }
-        const targetList = await jsonRes.json();
+        const targetList: CdpTarget[] = await jsonRes.json();
 
         if (Array.isArray(targetList) && targetList.length > 0) {
           setTargets(targetList);
@@ -552,16 +657,16 @@ export default function App() {
           return;
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       clearTimeout(timer);
-      addDevToolsLog('Bridge', 'error', `Không phản hồi từ ${baseUrl}: ${e.message}`);
+      addDevToolsLog('Bridge', 'error', `Không phản hồi từ ${baseUrl}: ${e?.message || e}`);
     }
 
     setBridgeStatus('error');
     setStatusMessage('Chưa phản hồi. Hãy chạy cai-dat.ps1 trên máy tính rồi thử lại.');
   }, [addDevToolsLog, attachToTarget, getBridgeBaseUrl, getCleanHost, vibePin]);
 
-  const loadDirectory = useCallback(async (dirPath = '') => {
+  const loadDirectory = useCallback(async (dirPath: string = '') => {
     try {
       const baseUrl = getBridgeBaseUrl();
       const q = dirPath ? `?path=${encodeURIComponent(dirPath)}` : '';
@@ -575,12 +680,12 @@ export default function App() {
         setFsContextMeta(data.contextMeta || null);
         addDevToolsLog('FS', 'info', `Đã tải thư mục: ${data.currentPath}`);
       }
-    } catch (e) {
-      addDevToolsLog('FS', 'error', `Lỗi tải thư mục: ${e.message}`);
+    } catch (e: any) {
+      addDevToolsLog('FS', 'error', `Lỗi tải thư mục: ${e?.message || e}`);
     }
   }, [getBridgeBaseUrl, vibePin, addDevToolsLog]);
 
-  const openFolderInVSCode = async (folderPath) => {
+  const openFolderInVSCode = async (folderPath: string) => {
     try {
       const baseUrl = getBridgeBaseUrl();
       const res = await fetch(`${baseUrl}/open`, {
@@ -592,12 +697,12 @@ export default function App() {
         addDevToolsLog('Host', 'info', `Đã mở thư mục trong VS Code: ${folderPath}`);
         setTimeout(() => scanAndConnect(), 1500);
       }
-    } catch (e) {
-      addDevToolsLog('Host', 'error', `Lỗi mở thư mục: ${e.message}`);
+    } catch (e: any) {
+      addDevToolsLog('Host', 'error', `Lỗi mở thư mục: ${e?.message || e}`);
     }
   };
 
-  const saveContextArtifact = async (fileName, content) => {
+  const saveContextArtifact = async (fileName: string, content: any) => {
     if (!currentFsPath) return;
     try {
       const baseUrl = getBridgeBaseUrl();
@@ -610,8 +715,8 @@ export default function App() {
         addDevToolsLog('Context', 'info', `Đã lưu tệp ngữ cảnh: ${fileName}`);
         loadDirectory(currentFsPath);
       }
-    } catch (e) {
-      addDevToolsLog('Context', 'error', `Lỗi lưu tệp ngữ cảnh: ${e.message}`);
+    } catch (e: any) {
+      addDevToolsLog('Context', 'error', `Lỗi lưu tệp ngữ cảnh: ${e?.message || e}`);
     }
   };
 
@@ -622,6 +727,10 @@ export default function App() {
       canvas.width = 640;
       canvas.height = 400;
       const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        addDevToolsLog('Recorder', 'error', 'Không thể khởi tạo Canvas 2D context.');
+        return;
+      }
 
       const stream = canvas.captureStream(15);
       const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
@@ -658,11 +767,9 @@ export default function App() {
         ctx.font = 'bold 12px sans-serif';
         ctx.fillText(`VibeCode Live Session - ${hostInfo?.host || 'PC'} (${realCdpRttMs || 0}ms)`, 32, 22);
 
-        if (screenshotBase64) {
-          const img = new Image();
-          img.src = `data:image/jpeg;base64,${screenshotBase64}`;
+        if (activeScreenshotImgRef.current) {
           try {
-            ctx.drawImage(img, 10, 46, 380, 240);
+            ctx.drawImage(activeScreenshotImgRef.current, 10, 46, 380, 240);
           } catch {}
         }
 
@@ -687,19 +794,22 @@ export default function App() {
       mediaRecorderRef.current = recorder;
       setIsRecordingVideo(true);
       addDevToolsLog('Recorder', 'info', 'Bắt đầu ghi hình phiên kết nối.');
-    } catch (e) {
-      addDevToolsLog('Recorder', 'error', `Không thể ghi hình: ${e.message}`);
+    } catch (e: any) {
+      addDevToolsLog('Recorder', 'error', `Không thể ghi hình: ${e?.message || e}`);
     }
   };
-
   const stopRecordingRealVideo = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
     }
   };
 
-  const handleLiveImageTouchClick = async (event) => {
+  const handleLiveImageTouchClick = async (event: React.MouseEvent<HTMLImageElement>) => {
     if (!wsConnected) return;
+    if (!touchClickEnabled) {
+      addDevToolsLog('CDP', 'warn', 'Chế độ Chạm-để-Click đang TẮT để chống chạm nhầm. Hãy bật nút [Chạm Click: BẬT] nếu muốn click.');
+      return;
+    }
     const imgEl = event.currentTarget;
     const rect = imgEl.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -734,12 +844,12 @@ export default function App() {
       });
       addDevToolsLog('CDP', 'info', `Đã click chuột tại tọa độ (${realX}, ${realY})`);
       setTimeout(() => refreshAllLiveState(), 450);
-    } catch (err) {
-      addDevToolsLog('CDP', 'error', `Lỗi click từ xa: ${err.message}`);
+    } catch (err: any) {
+      addDevToolsLog('CDP', 'error', `Lỗi click từ xa: ${err?.message || err}`);
     }
   };
 
-  const sendRemoteScroll = async (deltaY) => {
+  const sendRemoteScroll = async (deltaY: number) => {
     if (!wsConnected) return;
     const centerX = Math.round((remoteViewport.width || 1280) / 2);
     const centerY = Math.round((remoteViewport.height || 800) / 2);
@@ -752,14 +862,14 @@ export default function App() {
         deltaY
       });
       setTimeout(() => refreshAllLiveState(), 400);
-    } catch (err) {
-      addDevToolsLog('CDP', 'error', `Lỗi cuộn trang: ${err.message}`);
+    } catch (err: any) {
+      addDevToolsLog('CDP', 'error', `Lỗi cuộn trang: ${err?.message || err}`);
     }
   };
 
-  const sendRemoteSpecialKey = async (keyLabel) => {
+  const sendRemoteSpecialKey = async (keyLabel: string) => {
     if (!wsConnected) return;
-    const keyMap = {
+    const keyMap: Record<string, { key: string; code: string; keyCode: number; text?: string; modifiers?: number }> = {
       Enter: { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
       Escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
       Tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
@@ -788,12 +898,12 @@ export default function App() {
       });
       addDevToolsLog('CDP', 'info', `Đã gửi phím vật lý [${keyLabel}]`);
       setTimeout(() => refreshAllLiveState(), 450);
-    } catch (err) {
-      addDevToolsLog('CDP', 'error', `Lỗi gửi phím ${keyLabel}: ${err.message}`);
+    } catch (err: any) {
+      addDevToolsLog('CDP', 'error', `Lỗi gửi phím ${keyLabel}: ${err?.message || err}`);
     }
   };
 
-  const injectPromptToVSCode = async (rawText) => {
+  const injectPromptToVSCode = async (rawText: string) => {
     if (!rawText.trim() || !wsConnected || isSending) return;
     setIsSending(true);
 
@@ -836,7 +946,7 @@ export default function App() {
       }
 
       setPipelineStep({ step: 1, label: '1/4: Click-First Focus (500ms)', active: true });
-      const focusResult = await sendCdpCommand('Runtime.evaluate', {
+      const focusResult: any = await sendCdpCommand('Runtime.evaluate', {
         expression: `(() => {
           const selectors = ['.interactive-input-part textarea.inputarea', '.interactive-input-part [role="textbox"]', 'textarea.inputarea', 'textarea'];
           for (const sel of selectors) {
@@ -877,7 +987,7 @@ export default function App() {
       await new Promise((r) => setTimeout(r, 500));
 
       setPipelineStep({ step: 3, label: '3/4: Kiểm tra nút Send & Recovery Dance', active: true });
-      const checkLock = await sendCdpCommand('Runtime.evaluate', {
+      const checkLock: any = await sendCdpCommand('Runtime.evaluate', {
         expression: `(() => {
           const btns = Array.from(document.querySelectorAll('button, .monaco-button, [role="button"]'))
             .filter(b => /Send|Submit|Gửi/i.test(b.innerText || b.getAttribute('aria-label') || b.getAttribute('title') || ''));
@@ -915,9 +1025,9 @@ export default function App() {
       setPromptInput('');
       setPipelineStep({ step: 4, label: 'Đã hoàn tất gửi lệnh!', active: false });
       setTimeout(() => refreshAllLiveState(), 1100);
-    } catch (err) {
-      addDevToolsLog('CDP', 'error', `Thất bại khi gửi lệnh: ${err.message}`);
-      setPipelineStep({ step: 0, label: `Lỗi: ${err.message}`, active: false });
+    } catch (err: any) {
+      addDevToolsLog('CDP', 'error', `Thất bại khi gửi lệnh: ${err?.message || err}`);
+      setPipelineStep({ step: 0, label: `Lỗi: ${err?.message || err}`, active: false });
     } finally {
       setIsSending(false);
     }
@@ -1362,7 +1472,7 @@ export default function App() {
                 </span>
 
                 <div className="flex items-center gap-1">
-                  {['all', 'error', 'warn', 'cdp'].map((f) => (
+                  {(['all', 'error', 'warn', 'cdp'] as const).map((f) => (
                     <button
                       key={f}
                       type="button"
@@ -1622,10 +1732,23 @@ export default function App() {
 
             <div className="flex-1 min-h-0 bg-[#10141f] border border-zinc-800 rounded-2xl p-2 flex flex-col overflow-hidden">
               <div className="flex items-center justify-between text-[11px] text-zinc-400 mb-1 px-1">
-                <span className="flex items-center gap-1">
-                  <MousePointerClick className="w-3.5 h-3.5 text-amber-400" />
-                  Chạm trực tiếp vào ảnh để Click chuột thật trong VS Code
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className="flex items-center gap-1">
+                    <MousePointerClick className="w-3.5 h-3.5 text-amber-400" />
+                    Chạm ảnh để Click:
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setTouchClickEnabled((v) => !v)}
+                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border transition ${
+                      touchClickEnabled
+                        ? 'bg-rose-600 text-white border-rose-500 animate-pulse'
+                        : 'bg-[#080a0f] border-zinc-700 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {touchClickEnabled ? 'BẬT (Click thật)' : 'TẮT (Khóa chống chạm)'}
+                  </button>
+                </div>
                 {lastClickMarker && (
                   <span className="font-mono text-[10px] text-emerald-400">
                     ({lastClickMarker.realX}, {lastClickMarker.realY})
@@ -1667,17 +1790,35 @@ export default function App() {
                 <Keyboard className="w-3.5 h-3.5 text-amber-400" />
                 Phím:
               </span>
-              {['Enter', 'Escape', 'Tab', 'Backspace', 'Ctrl+S', 'Ctrl+C'].map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => sendRemoteSpecialKey(k)}
-                  disabled={!wsConnected}
-                  className="shrink-0 px-2.5 py-1 rounded-xl bg-[#080a0f] border border-zinc-700 hover:border-amber-500/50 text-xs font-mono text-zinc-200 active:scale-95 disabled:opacity-40"
-                >
-                  {k}
-                </button>
-              ))}
+              {['Enter', 'Escape', 'Tab', 'Backspace', 'Ctrl+S', 'Ctrl+C'].map((k) => {
+                const isCtrlC = k === 'Ctrl+C';
+                const isArmed = isCtrlC && confirmCtrlC;
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => {
+                      if (isCtrlC && !confirmCtrlC) {
+                        setConfirmCtrlC(true);
+                        setTimeout(() => setConfirmCtrlC(false), 3000);
+                        return;
+                      }
+                      if (isCtrlC) {
+                        setConfirmCtrlC(false);
+                      }
+                      sendRemoteSpecialKey(k);
+                    }}
+                    disabled={!wsConnected}
+                    className={`shrink-0 px-2.5 py-1 rounded-xl text-xs font-mono active:scale-95 disabled:opacity-40 transition border ${
+                      isArmed
+                        ? 'bg-rose-600 text-white border-rose-400 font-bold animate-pulse'
+                        : 'bg-[#080a0f] border-zinc-700 hover:border-amber-500/50 text-zinc-200'
+                    }`}
+                  >
+                    {isArmed ? 'DỪNG TIẾN TRÌNH? (BẤM LẠI)' : k}
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
